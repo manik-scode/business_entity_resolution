@@ -14,3 +14,9 @@ __pycache__/
 # Virtual environment
 .venv/
 venv/
+
+# Generated blocking databases
+results/blocking/
+*.db
+*.sqlite
+*.sqlite3
