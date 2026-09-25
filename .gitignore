@@ -1,0 +1,16 @@
+# Amazon challenge dataset
+student_resource/
+
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Virtual environment
+.venv/
+venv/
