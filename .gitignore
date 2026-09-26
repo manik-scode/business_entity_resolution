@@ -20,3 +20,32 @@ results/blocking/
 *.db
 *.sqlite
 *.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Large datasets
+data/
+student_resource/dataset/
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated results
+results/
+*.tsv
+*.csv
+
+# Models / checkpoints
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Secrets
+.env
