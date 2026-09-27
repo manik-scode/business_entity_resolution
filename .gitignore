@@ -49,3 +49,4 @@ results/
 
 # Secrets
 .env
+business_entity_resolution_submission.zip

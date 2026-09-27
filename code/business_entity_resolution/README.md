@@ -1,0 +1,244 @@
+# Business Entity Resolution Challenge
+
+## Amazon ML Challenge 2026
+
+This project implements a scalable business entity resolution pipeline for matching records from multiple business data sources.
+
+The objective is to identify all S2 and S3 entities that correspond to each S1 entity while handling noisy business names, addresses, missing values, formatting variations, and multiple valid matches.
+
+---
+
+## 1. Problem Overview
+
+The challenge contains three sources:
+
+- S1 — reference/test entities
+- S2 — candidate business entities
+- S3 — candidate business entities
+
+For every S1 entity, the system must identify zero, one, or multiple matching entities from S2 and S3.
+
+The data contains:
+
+- Business names
+- Business addresses
+- Country information
+- Entity IDs
+
+The matching problem is challenging because records can contain:
+
+- Name spelling variations
+- Word-order changes
+- Address formatting differences
+- Missing addresses
+- Token variations
+- Multiple matching entities
+
+The evaluation metric is F0.5, which places greater importance on precision while still requiring good recall.
+
+---
+
+## 2. Solution Overview
+
+The solution uses a two-stage entity resolution pipeline:
+
+1. Candidate Generation / Blocking
+2. Machine Learning based Candidate Matching
+
+The overall architecture is:
+
+S1 Records
+    |
+    v
+Candidate Generation
+    |
+    v
+Blocked Candidate Pairs
+    |
+    v
+Feature Engineering
+    |
+    v
+XGBoost Entity Matching Model
+    |
+    v
+Probability Threshold
+    |
+    v
+Final Matching Results
+
+---
+
+## 3. Candidate Generation
+
+Directly comparing every S1 entity against every S2/S3 entity would produce an extremely large number of comparisons.
+
+Therefore, blocking rules are used to generate a manageable candidate set.
+
+The final test candidate set contains:
+
+- S1 entities: 1,732,544
+- Candidate pairs: 44,819,572
+
+The candidate generation process uses normalized entity attributes and multiple blocking signals.
+
+Important signals include:
+
+- Exact normalized business name
+- Sorted normalized business name
+- Token-normalized business name
+- Name token and address-number combinations
+- Address-number based blocking
+- Address-token based blocking
+- First-name-token and address-token combinations
+- Additional name/address signatures
+
+The blocking stage is designed to prioritize candidate recall while controlling the total number of candidate pairs.
+
+---
+
+## 4. Feature Engineering
+
+Each candidate pair is transformed into numerical matching features.
+
+The final model uses 19 features.
+
+### Exact Matching Features
+
+- name_exact
+- name_sorted_exact
+- name_token_exact
+- first_name_exact
+- name_prefix_exact
+- name_suffix_exact
+- address_exact
+- address_number_exact
+- address_token_exact
+
+### Similarity Features
+
+- name_fuzz
+- address_fuzz
+- name_token_jaccard
+- address_token_jaccard
+
+### Length Features
+
+- name_len_diff
+- address_len_diff
+
+### Missing Value Features
+
+- s1_name_missing
+- candidate_name_missing
+- s1_address_missing
+- candidate_address_missing
+
+These features allow the model to combine exact matching signals with fuzzy similarity and missing-value information.
+
+---
+
+## 5. Matching Model
+
+The matching model is an XGBoost binary classifier.
+
+Model configuration:
+
+- Objective: binary:logistic
+- Evaluation metric: logloss
+- Max depth: 8
+- Learning rate: 0.05
+- Subsample: 0.85
+- Column sampling: 0.90
+- Minimum child weight: 5
+- L2 regularization: 2.0
+- Tree method: histogram
+- Device: CUDA
+- Random seed: 42
+- Training rounds: up to 700
+
+The model was trained using an S1-level train/validation split so that entities from the same S1 record do not appear across both splits.
+
+---
+
+## 6. Validation
+
+The validation experiment used an S1-level split.
+
+Validation results showed that increasing the prediction threshold improves precision while reducing recall.
+
+The competition-level validation was evaluated at the S1 level because the challenge evaluates the matching results for each S1 entity.
+
+The selected final test threshold was:
+
+0.79
+
+The threshold was selected after comparing multiple thresholds using the challenge leaderboard feedback.
+
+---
+
+## 7. Test Inference
+
+The final test candidate set contains:
+
+44,819,572 candidate pairs
+
+The trained XGBoost model was applied to these candidate pairs in batches to avoid loading the complete candidate set into memory.
+
+Batch processing was used during inference.
+
+The final threshold used for the submission:
+
+0.79
+
+The final matching file contains:
+
+1,732,544 S1 rows
+
+including S1 entities with no predicted matches.
+
+---
+
+## 8. Output Files
+
+### matching_results.tsv
+
+Contains the final predictions.
+
+Format:
+
+source1_entity_id    matched_entity_ids
+
+For each S1 entity:
+
+- `matched_entity_ids` contains one or more matching S2/S3 entity IDs separated by commas.
+- An empty value represents no predicted match.
+
+### candidate_pairs.tsv
+
+Contains the candidate pairs generated by the blocking stage.
+
+Every final predicted match must exist in this candidate set.
+
+---
+
+## 9. Repository Structure
+
+```text
+business_entity_resolution/
+│
+├── output/
+│   ├── matching_results.tsv
+│   └── candidate_pairs.tsv
+│
+├── code/
+│   └── business_entity_resolution/
+│       ├── src/
+│       │   ├── blocking/
+│       │   ├── model/
+│       │   └── pipeline/
+│       │
+│       ├── README.md
+│       └── requirements.txt
+│
+└── Documentation_template.md

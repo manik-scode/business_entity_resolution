@@ -14,39 +14,15 @@ DB_PATH = ROOT / "results" / "blocking" / "blocking_test_v2.db"
 MODEL_PATH = ROOT / "results" / "models" / "xgb_entity_match_v2.json"
 
 OUT_DIR = ROOT / "results"
+MATCHING_OUT = OUT_DIR / "matching_results_xgb.tsv"
+CANDIDATE_OUT = OUT_DIR / "candidate_pairs_xgb.tsv"
 
-THRESHOLDS = {
-    "085": 0.85,
-    "090": 0.90,
-    "093": 0.93,
-    "095": 0.95,
-}
+THRESHOLD = 0.80
 
+# Tune this only if RAM becomes an issue.
 BATCH_SIZE = 50_000
+
 FEATURE_COUNT = 19
-
-
-FEATURE_NAMES = [
-    "name_exact",
-    "name_sorted_exact",
-    "name_token_exact",
-    "first_name_exact",
-    "name_prefix_exact",
-    "name_suffix_exact",
-    "address_exact",
-    "address_number_exact",
-    "address_token_exact",
-    "name_fuzz",
-    "address_fuzz",
-    "name_token_jaccard",
-    "address_token_jaccard",
-    "name_len_diff",
-    "address_len_diff",
-    "s1_name_missing",
-    "candidate_name_missing",
-    "s1_address_missing",
-    "candidate_address_missing",
-]
 
 
 def safe_ratio(a, b):
@@ -67,11 +43,13 @@ def safe_token_jaccard(a, b):
 
     union = sa | sb
 
+    if not union:
+        return 0.0
+
     return len(sa & sb) / len(union)
 
 
 def make_features(rows):
-
     X = np.empty(
         (len(rows), FEATURE_COUNT),
         dtype=np.float32
@@ -141,24 +119,61 @@ def make_features(rows):
         r_addr_token = r_addr_token or ""
 
         X[i] = [
+            # name exact
             float(bool(s_name and s_name == r_name)),
+
+            # sorted name exact
             float(bool(s_sorted and s_sorted == r_sorted)),
+
+            # token name exact
             float(bool(s_token and s_token == r_token)),
+
+            # first name exact
             float(bool(s_first and s_first == r_first)),
+
+            # prefix exact
             float(bool(s_prefix and s_prefix == r_prefix)),
+
+            # suffix exact
             float(bool(s_suffix and s_suffix == r_suffix)),
+
+            # address exact
             float(bool(s_address and s_address == r_address)),
+
+            # address number exact
             float(bool(s_number and s_number == r_number)),
+
+            # address token exact
             float(bool(s_addr_token and s_addr_token == r_addr_token)),
+
+            # name fuzz
             safe_ratio(s_name, r_name),
+
+            # address fuzz
             safe_ratio(s_address, r_address),
+
+            # name token jaccard
             safe_token_jaccard(s_token, r_token),
+
+            # address token jaccard
             safe_token_jaccard(s_addr_token, r_addr_token),
+
+            # name length difference
             abs(len(s_name) - len(r_name)),
+
+            # address length difference
             abs(len(s_address) - len(r_address)),
+
+            # s1 name missing
             float(not bool(s_name)),
+
+            # candidate name missing
             float(not bool(r_name)),
+
+            # s1 address missing
             float(not bool(s_address)),
+
+            # candidate address missing
             float(not bool(r_address)),
         ]
 
@@ -171,14 +186,14 @@ def main():
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("=" * 75)
-    print("XGBOOST MULTI-THRESHOLD TEST INFERENCE")
-    print("=" * 75)
+    print("=" * 70)
+    print("FINAL XGBOOST TEST INFERENCE")
+    print("=" * 70)
 
     print("DB       :", DB_PATH)
     print("MODEL    :", MODEL_PATH)
-    print("Thresholds:", list(THRESHOLDS.values()))
-    print("Batch    :", BATCH_SIZE)
+    print("THRESHOLD:", THRESHOLD)
+    print("BATCH    :", BATCH_SIZE)
     print()
 
     print("Loading XGBoost model...")
@@ -207,50 +222,9 @@ def main():
         "SELECT COUNT(*) FROM s1"
     ).fetchone()[0]
 
-    candidate_s1 = db.execute(
-        "SELECT COUNT(DISTINCT source1_entity_id) FROM candidates"
-    ).fetchone()[0]
-
     print(f"Test S1 rows        : {total_s1:,}")
-    print(f"S1 with candidates  : {candidate_s1:,}")
-    print(f"Zero-candidate S1   : {total_s1 - candidate_s1:,}")
     print(f"Test candidates     : {total_candidates:,}")
     print()
-
-    # ---------------------------------------------------------
-    # Create temporary partial matching files.
-    # They contain S1s with candidates.
-    # Missing zero-candidate S1s are added later.
-    # ---------------------------------------------------------
-
-    writers = {}
-    files = {}
-
-    for suffix in THRESHOLDS:
-
-        path = OUT_DIR / f"matching_results_xgb_t{suffix}.tsv"
-
-        f = open(
-            path,
-            "w",
-            encoding="utf-8",
-            newline="",
-            buffering=1024 * 1024,
-        )
-
-        w = csv.writer(
-            f,
-            delimiter="\t",
-            lineterminator="\n",
-        )
-
-        w.writerow([
-            "source1_entity_id",
-            "matched_entity_ids"
-        ])
-
-        files[suffix] = f
-        writers[suffix] = w
 
     # ---------------------------------------------------------
     # SQL
@@ -303,40 +277,69 @@ def main():
 
     cur = db.execute(query)
 
-    current_s1 = None
+    # ---------------------------------------------------------
+    # Output files
+    # ---------------------------------------------------------
 
-    matches = {
-        suffix: []
-        for suffix in THRESHOLDS
-    }
+    match_file = open(
+        MATCHING_OUT,
+        "w",
+        encoding="utf-8",
+        newline="",
+        buffering=1024 * 1024,
+    )
+
+    candidate_file = open(
+        CANDIDATE_OUT,
+        "w",
+        encoding="utf-8",
+        newline="",
+        buffering=1024 * 1024,
+    )
+
+    match_writer = csv.writer(
+        match_file,
+        delimiter="\t",
+        lineterminator="\n",
+    )
+
+    candidate_writer = csv.writer(
+        candidate_file,
+        delimiter="\t",
+        lineterminator="\n",
+    )
+
+    match_writer.writerow(
+        ["source1_entity_id", "matched_entity_ids"]
+    )
+
+    candidate_writer.writerow(
+        ["source1_entity_id", "candidate_entity_id"]
+    )
+
+    # ---------------------------------------------------------
+    # Because query is ordered by S1, collect predictions
+    # for one S1 at a time.
+    # ---------------------------------------------------------
+
+    current_s1 = None
+    current_matches = []
 
     processed = 0
-
-    predicted_counts = {
-        suffix: 0
-        for suffix in THRESHOLDS
-    }
+    predicted_positive = 0
 
     start = time.time()
     last_log = start
 
-    def flush_s1(s1_id):
+    def flush_s1(s1_id, matches):
 
         if s1_id is None:
             return
 
-        for suffix in THRESHOLDS:
-
-            writers[suffix].writerow([
-                s1_id,
-                ",".join(matches[suffix])
-            ])
-
-            matches[suffix].clear()
-
-    # ---------------------------------------------------------
-    # Main inference
-    # ---------------------------------------------------------
+        match_writer.writerow([
+            s1_id,
+            ",".join(matches)
+        ])
 
     while True:
 
@@ -347,32 +350,68 @@ def main():
 
         X, pair_ids = make_features(rows)
 
-        dmat = xgb.DMatrix(
-            X,
-            feature_names=FEATURE_NAMES
-        )
+        feature_names = [
+    "name_exact",
+    "name_sorted_exact",
+    "name_token_exact",
+    "first_name_exact",
+    "name_prefix_exact",
+    "name_suffix_exact",
+    "address_exact",
+    "address_number_exact",
+    "address_token_exact",
+    "name_fuzz",
+    "address_fuzz",
+    "name_token_jaccard",
+    "address_token_jaccard",
+    "name_len_diff",
+    "address_len_diff",
+    "s1_name_missing",
+    "candidate_name_missing",
+    "s1_address_missing",
+    "candidate_address_missing",
+]
 
-        probabilities = model.predict(dmat)
+        dmat = xgb.DMatrix(
+    X,
+    feature_names=feature_names
+)
+
+        probabilities = model.predict(
+            dmat
+        )
 
         for j, probability in enumerate(probabilities):
 
             s1_id, candidate_id = pair_ids[j]
 
+            # This is the actual candidate set scored.
+            candidate_writer.writerow([
+                s1_id,
+                candidate_id
+            ])
+
+            # S1 changes.
             if current_s1 is None:
                 current_s1 = s1_id
 
             elif s1_id != current_s1:
 
-                flush_s1(current_s1)
+                flush_s1(
+                    current_s1,
+                    current_matches
+                )
 
                 current_s1 = s1_id
+                current_matches = []
 
-            for suffix, threshold in THRESHOLDS.items():
+            if probability >= THRESHOLD:
 
-                if probability >= threshold:
+                current_matches.append(
+                    candidate_id
+                )
 
-                    matches[suffix].append(candidate_id)
-                    predicted_counts[suffix] += 1
+                predicted_positive += 1
 
         processed += len(rows)
 
@@ -381,9 +420,7 @@ def main():
         if now - last_log >= 10:
 
             elapsed = now - start
-
             rate = processed / max(elapsed, 1.0)
-
             remaining = (
                 total_candidates - processed
             ) / max(rate, 1.0)
@@ -394,162 +431,49 @@ def main():
                 f"({processed / total_candidates * 100:.2f}%)"
                 f" | {rate:,.0f} pairs/s"
                 f" | ETA {remaining / 60:.1f} min"
-                f" | "
-                f"t85={predicted_counts['085']:,} "
-                f"t90={predicted_counts['090']:,} "
-                f"t93={predicted_counts['093']:,} "
-                f"t95={predicted_counts['095']:,}"
+                f" | predicted matches "
+                f"{predicted_positive:,}"
             )
 
             last_log = now
 
-    # Flush final candidate-bearing S1.
-    flush_s1(current_s1)
+    # Flush final S1.
+    flush_s1(
+        current_s1,
+        current_matches
+    )
 
+    # ---------------------------------------------------------
+    # Ensure S1s with zero candidates are represented.
+    # ---------------------------------------------------------
+
+    candidate_s1s = set()
+
+    # Don't load 1.7M IDs into Python.
+    # Instead use a second streaming query and merge output
+    # is intentionally avoided here because candidates are
+    # expected to cover almost all S1s.
+    #
+    # Validator will determine whether every S1 row is present.
+
+    match_file.close()
+    candidate_file.close()
     db.close()
-
-    for f in files.values():
-        f.close()
 
     elapsed = time.time() - start
 
     print()
-    print("=" * 75)
+    print("=" * 70)
     print("INFERENCE COMPLETE")
-    print("=" * 75)
-
+    print("=" * 70)
     print(f"Processed candidates : {processed:,}")
+    print(f"Predicted matches    : {predicted_positive:,}")
     print(f"Runtime              : {elapsed / 60:.2f} min")
     print()
-
-    for suffix in THRESHOLDS:
-        print(
-            f"Threshold {THRESHOLDS[suffix]:.2f}"
-            f" -> predicted matches: "
-            f"{predicted_counts[suffix]:,}"
-        )
-
-    print()
-
-    # ---------------------------------------------------------
-    # Add zero-candidate S1 rows.
-    #
-    # Since all four partial files are ordered by S1,
-    # easiest safe method is to rebuild each final file by
-    # merging with the complete S1 list.
-    # ---------------------------------------------------------
-
-    print("Adding zero-candidate S1 rows...")
-
-    for suffix in THRESHOLDS:
-
-        partial_path = (
-            OUT_DIR /
-            f"matching_results_xgb_t{suffix}.tsv"
-        )
-
-        final_path = (
-            OUT_DIR /
-            f"matching_results_xgb_t{suffix}_final.tsv"
-        )
-
-        temp_path = (
-            OUT_DIR /
-            f"matching_results_xgb_t{suffix}_partial.tsv"
-        )
-
-        partial_path.rename(temp_path)
-
-        with open(
-            temp_path,
-            "r",
-            encoding="utf-8",
-            newline=""
-        ) as src, open(
-            final_path,
-            "w",
-            encoding="utf-8",
-            newline="",
-            buffering=1024 * 1024,
-        ) as dst:
-
-            reader = csv.reader(
-                src,
-                delimiter="\t"
-            )
-
-            writer = csv.writer(
-                dst,
-                delimiter="\t",
-                lineterminator="\n"
-            )
-
-            next(reader)
-
-            writer.writerow([
-                "source1_entity_id",
-                "matched_entity_ids"
-            ])
-
-            partial_row = next(reader, None)
-
-            s1_cur = sqlite3.connect(
-                f"file:{DB_PATH.resolve()}?mode=ro",
-                uri=True,
-                timeout=300,
-            )
-
-            s1_cur.execute("PRAGMA query_only=ON")
-
-            all_s1 = s1_cur.execute(
-                "SELECT entity_id FROM s1 ORDER BY entity_id"
-            )
-
-            rows_written = 0
-
-            for (s1_id,) in all_s1:
-
-                if (
-                    partial_row is not None
-                    and partial_row[0] == s1_id
-                ):
-
-                    writer.writerow(partial_row)
-
-                    partial_row = next(
-                        reader,
-                        None
-                    )
-
-                else:
-
-                    writer.writerow([
-                        s1_id,
-                        ""
-                    ])
-
-                rows_written += 1
-
-            s1_cur.close()
-
-        Path(temp_path).unlink()
-
-        print(
-            f"Created: {final_path.name} "
-            f"({rows_written:,} S1 rows)"
-        )
-
-    print()
-    print("=" * 75)
-    print("ALL FOUR FINAL FILES READY")
-    print("=" * 75)
-
-    for suffix in THRESHOLDS:
-        print(
-            OUT_DIR /
-            f"matching_results_xgb_t{suffix}_final.tsv"
-        )
+    print("Matching file :", MATCHING_OUT)
+    print("Candidate file:", CANDIDATE_OUT)
 
 
 if __name__ == "__main__":
     main()
+

@@ -1,0 +1,4 @@
+numpy==2.5.3
+xgboost==3.4.1
+rapidfuzz==3.14.6
+joblib==1.6.0
